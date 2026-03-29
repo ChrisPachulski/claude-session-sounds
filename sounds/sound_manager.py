@@ -14,32 +14,20 @@ import random
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 SOUNDS_DIR = Path(__file__).parent
 ASSIGNMENTS_DIR = SOUNDS_DIR / "assignments"
 STALE_HOURS = 12
 
-SOUND_POOL = [
-    {"file": "mario_powerup.wav", "name": "Power-Up"},
-    {"file": "scorpion.wav", "name": "Scorpion"},
-    {"file": "pokeball.wav", "name": "Gotcha"},
-    {"file": "tetris.wav", "name": "Tetris"},
-    {"file": "r2d2.wav", "name": "R2-D2"},
-    {"file": "minecraft.wav", "name": "Minecraft"},
-    {"file": "pentakill.wav", "name": "Pentakill"},
-    {"file": "lightsaber.wav", "name": "Lightsaber"},
-    {"file": "civ.wav", "name": "New Era"},
-    {"file": "mission.wav", "name": "Mission"},
-    {"file": "bond.wav", "name": "007"},
-    {"file": "shire.wav", "name": "The Shire"},
-    {"file": "mohican.wav", "name": "Mohican"},
-    {"file": "coolcat.wav", "name": "Cool Cat"},
-    {"file": "mangione.wav", "name": "Feels So Good"},
-    {"file": "abouttime.wav", "name": "About Time"},
-    {"file": "creek.wav", "name": "Creek"},
-]
+
+def _load_pool() -> list[dict[str, str]]:
+    """Build sound pool from .wav files in the sounds directory."""
+    pool = []
+    for wav in sorted(SOUNDS_DIR.glob("*.wav")):
+        name = wav.stem.replace("_", " ").title()
+        pool.append({"file": wav.name, "name": name})
+    return pool
 
 
 def _cleanup_stale() -> None:
@@ -95,7 +83,7 @@ def _play_sound(wav_path: Path) -> None:
 
 def _find_sound_by_name(name: str) -> dict[str, str] | None:
     """Find a sound pool entry whose name matches (case-insensitive)."""
-    for entry in SOUND_POOL:
+    for entry in _load_pool():
         if entry["name"].lower() == name.lower():
             return entry
     return None
@@ -103,13 +91,16 @@ def _find_sound_by_name(name: str) -> dict[str, str] | None:
 
 def pick() -> None:
     """Pick an available sound and output the title. Used by shell wrapper."""
+    pool = _load_pool()
+    if not pool:
+        return
     ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
     _cleanup_stale()
 
     assigned = _get_assigned_files()
-    available = [s for s in SOUND_POOL if s["file"] not in assigned]
+    available = [s for s in pool if s["file"] not in assigned]
     if not available:
-        available = SOUND_POOL
+        available = pool
 
     choice = random.choice(available)
     print(_build_title(choice["name"]))
@@ -117,6 +108,9 @@ def pick() -> None:
 
 def assign(session_id: str) -> None:
     """Assign a sound to this session, matching the --name from the wrapper."""
+    pool = _load_pool()
+    if not pool:
+        return
     ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
     _cleanup_stale()
 
@@ -124,7 +118,6 @@ def assign(session_id: str) -> None:
     if existing.is_file():
         choice = json.loads(existing.read_text())
     else:
-        # Try to match the --name value from the session file
         choice = None
         try:
             import os
@@ -140,7 +133,7 @@ def assign(session_id: str) -> None:
 
         if choice is None:
             assigned = _get_assigned_files()
-            available = [s for s in SOUND_POOL if s["file"] not in assigned]
+            available = [s for s in pool if s["file"] not in assigned]
             if not available:
                 return
             choice = random.choice(available)
