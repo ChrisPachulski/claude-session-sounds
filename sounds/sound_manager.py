@@ -9,11 +9,14 @@ Called by hooks with JSON on stdin containing session_id:
 Called directly by shell wrapper (no stdin):
     python sound_manager.py pick     # Pre-pick a sound for --name flag
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -120,8 +123,17 @@ def _play_sound(wav_path: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
     else:
+        player = None
+        for candidate in ("paplay", "pw-play", "aplay"):
+            if shutil.which(candidate):
+                player = candidate
+                break
+        if player is None:
+            log.warning("_play_sound: no audio player found (tried paplay, pw-play, aplay)")
+            return
+        cmd = [player, str(wav_path)] if player != "aplay" else [player, "-q", str(wav_path)]
         subprocess.run(
-            ["aplay", "-q", str(wav_path)],
+            cmd,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
 

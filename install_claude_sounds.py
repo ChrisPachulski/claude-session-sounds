@@ -7,6 +7,8 @@ Usage:
 
 Copies sounds, installs hooks, adds shell wrapper, configures VS Code.
 """
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -45,22 +47,24 @@ def _hook_commands() -> dict:
 def _powershell_wrapper() -> str:
     sm = str(SOUNDS_DST / "sound_manager.py").replace("/", "\\")
     tk = str(SOUNDS_DST / "title_keeper.py").replace("/", "\\")
-    claude_exe = str(Path.home() / ".local" / "bin" / "claude.exe").replace("/", "\\")
+    fallback_exe = str(Path.home() / ".local" / "bin" / "claude.exe").replace("/", "\\")
     return f'''
 function claude {{
     $sm = if (Test-Path ".claude/sounds/sound_manager.py") {{ ".claude/sounds/sound_manager.py" }} else {{ "{sm}" }}
     $tk = if (Test-Path ".claude/sounds/title_keeper.py") {{ ".claude/sounds/title_keeper.py" }} else {{ "{tk}" }}
+    $claude_exe = (Get-Command claude -ErrorAction SilentlyContinue).Source
+    if (-not $claude_exe) {{ $claude_exe = "{fallback_exe}" }}
     $title = python $sm pick
     if ($title) {{
         $env:CLAUDE_SOUND_TITLE = $title
         $bg = Start-Process -NoNewWindow -PassThru -FilePath python -ArgumentList $tk
         try {{
-            & "{claude_exe}" --name $title @args
+            & $claude_exe --name $title @args
         }} finally {{
             Stop-Process -Id $bg.Id -ErrorAction SilentlyContinue
         }}
     }} else {{
-        & "{claude_exe}" @args
+        & $claude_exe @args
     }}
 }}'''
 
@@ -121,7 +125,11 @@ def install() -> None:
     print(f"  Created {SOUNDS_DST}")
 
     # 2. Copy sound files + scripts
+    # Note: codex_title_keeper.py is an optional Codex helper -- copied but not
+    # referenced by the default hook/wrapper configuration.
     for src in SOUNDS_SRC.iterdir():
+        if src.is_dir():
+            continue
         dst = SOUNDS_DST / src.name
         shutil.copy2(src, dst)
     wav_count = len(list(SOUNDS_DST.glob("*.wav")))

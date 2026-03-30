@@ -1,4 +1,6 @@
 """Keep the terminal title pinned to the assigned sound for Codex sessions."""
+from __future__ import annotations
+
 import os
 import sys
 import time
@@ -26,9 +28,15 @@ title = os.environ.get("CLAUDE_SOUND_TITLE", "") or (
 if not title:
     sys.exit(0)
 
+ppid = os.getppid()
+
 try:
     while True:
+        try:
+            os.kill(ppid, 0)
+        except OSError:
+            break
         _emit_title(title)
-        time.sleep(0.25)
+        time.sleep(2)
 except (KeyboardInterrupt, BrokenPipeError):
     pass

@@ -10,6 +10,15 @@ Each time you start Claude, a random sound is assigned. The sound plays after ev
 - **Named terminal tabs** -- each session gets a unique name (e.g., "Gotcha", "The Shire", "Pentakill")
 - **Works everywhere** -- Windows, macOS, Linux. VS Code integrated terminal, iTerm2, Terminal.app, etc.
 
+## Requirements
+
+- Python 3.9+
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and on your PATH
+- **Audio playback** (for notification sounds):
+  - Windows: built-in (winsound)
+  - macOS: built-in (afplay)
+  - Linux: one of `paplay` (PulseAudio), `pw-play` (PipeWire), or `aplay` (ALSA)
+
 ## Install
 
 ```bash
@@ -96,6 +105,14 @@ VS Code requires `terminal.integrated.tabs.title` set to `${sequence}` (the inst
 | takeonme.wav | Take On Me | a-ha |
 | tetris.wav | Tetris | Tetris theme |
 
+## Codex support
+
+The repo includes `codex_title_keeper.py` for use with OpenAI Codex sessions. It functions identically to `title_keeper.py` but emits title sequences compatible with Codex's terminal handling. Wire it into your Codex shell wrapper if needed.
+
 ## Uninstall
 
 Remove the hooks from `~/.claude/settings.json` (the `SessionStart`, `Stop`, and `SessionEnd` entries that reference `sound_manager.py` and `title_hook.py`), delete `~/.claude/sounds/`, and remove the `claude` function from your shell profile.
+
+## License
+
+MIT

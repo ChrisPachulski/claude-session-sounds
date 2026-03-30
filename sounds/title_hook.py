@@ -1,4 +1,6 @@
-﻿"""Hook script that pushes terminal-title updates for both Claude and Codex."""
+"""Hook script that pushes terminal-title updates for both Claude and Codex."""
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
@@ -43,27 +45,11 @@ def _emit_terminal_sequences(title: str) -> None:
         pass
 
 
-def _emit_codex_system_message(title: str) -> None:
-    sequence = f"\033]0;{title}\007\033]2;{title}\007"
-    payload = {
-        "systemMessage": sequence,
-        "hookSpecificOutput": {
-            "hookEventName": "TitleUpdate",
-            "additionalContext": sequence,
-        },
-    }
-    try:
-        print(json.dumps(payload))
-    except Exception:
-        pass
-
-
 def set_title() -> None:
     title = _get_title()
     if not title:
         return
     _emit_terminal_sequences(title)
-    _emit_codex_system_message(title)
 
 
 if __name__ == "__main__":
