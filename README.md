@@ -34,6 +34,9 @@ Sound specs: WAV, 44100 Hz, mono, 16-bit PCM, under 5 seconds, peak volume under
 
 | Want | Do |
 |------|----|
+| Disable everything | Set `SESSION_SOUNDS_DISABLED=1` in your environment |
+| Re-enable | Unset the variable |
+| Disable for one session | `SESSION_SOUNDS_DISABLED=1 claude` |
 | Sounds + tab names | Install and done (default) |
 | Sounds only, no tab names | Remove the `title_hook.py` entries from `settings.json` |
 | Tab names only, no sounds | Remove the `Stop` hook |

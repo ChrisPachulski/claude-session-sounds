@@ -332,6 +332,9 @@ def release(session_id: str) -> None:
 
 
 if __name__ == "__main__":
+    if os.environ.get("SESSION_SOUNDS_DISABLED"):
+        sys.exit(0)
+
     action = sys.argv[1] if len(sys.argv) > 1 else ""
 
     if action == "pick":

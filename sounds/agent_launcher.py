@@ -253,6 +253,9 @@ def _agent_cmd(agent: str, title: str, args: list[str]) -> list[str]:
 
 def launch(agent: str, args: list[str]) -> int:
     """Launch an agent with full sound + title lifecycle management."""
+    if os.environ.get("SESSION_SOUNDS_DISABLED"):
+        return subprocess.call(_agent_cmd(agent, "", args))
+
     result = _pick_sound()
     if not result:
         return subprocess.call(_agent_cmd(agent, "", args))
