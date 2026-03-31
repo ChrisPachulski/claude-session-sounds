@@ -2,7 +2,9 @@
 
 You run six Claude sessions and four Codex sessions across three terminals. A sound plays. Which session was that? No idea.
 
-Session Sounds fixes this. Every session gets a random notification sound and a named terminal tab. "Lightsaber" plays the lightsaber clip. "Gotcha" plays the Pokeball catch. You hear the sound, glance at the tab, and know exactly which session just finished thinking.
+Session Sounds helps with this. Every session gets a random notification sound and a named terminal tab. "Lightsaber" plays the lightsaber clip. "Gotcha" plays the Pokeball catch. You hear the sound, glance at the tab, and know which session just finished thinking.
+
+![Terminal tabs with session sound names](tabs.png)
 
 **The 25 included sounds are starter defaults.** Swap them, rename them, delete them, add your own. The system rebuilds the pool on every session start. Zero config beyond the initial install.
 
