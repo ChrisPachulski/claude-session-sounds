@@ -2,6 +2,8 @@
 
 Random notification sounds and named terminal tabs for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Codex](https://openai.com/index/introducing-codex/) sessions.
 
+**The included sounds are starter defaults.** Swap, rename, add, or remove any of them. The system is fully customizable -- make it yours.
+
 Each time you start a session, a random sound is assigned. The sound plays after every response, and your terminal tab shows the sound name so you can tell sessions apart at a glance.
 
 ## What you get
