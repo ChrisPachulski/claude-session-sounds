@@ -9,17 +9,15 @@ Called by hooks with JSON on stdin containing session_id:
 Called directly by shell wrapper (no stdin):
     python sound_manager.py pick     # Pre-pick a sound for --name flag
 """
-from __future__ import annotations
-
 import json
 import logging
 import os
 import random
 import re
-import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 SOUNDS_DIR = Path(__file__).parent
@@ -94,6 +92,22 @@ def _cleanup_stale() -> None:
             pass
 
 
+def _cleanup_orphaned_reservations() -> None:
+    """Remove reservation files that were never claimed (pick ran, Claude never started)."""
+    if not ASSIGNMENTS_DIR.is_dir():
+        return
+    cutoff = time.time() - 120  # 2 minutes
+    for f in ASSIGNMENTS_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+            reserved_at = data.get("reserved_at")
+            if reserved_at is not None and reserved_at < cutoff:
+                log.debug("Cleaning orphaned reservation: %s", f.name)
+                f.unlink(missing_ok=True)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
 def _get_assigned_files() -> set[str]:
     """Return set of sound filenames currently assigned to active sessions."""
     assigned = set()
@@ -123,17 +137,8 @@ def _play_sound(wav_path: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
     else:
-        player = None
-        for candidate in ("paplay", "pw-play", "aplay"):
-            if shutil.which(candidate):
-                player = candidate
-                break
-        if player is None:
-            log.warning("_play_sound: no audio player found (tried paplay, pw-play, aplay)")
-            return
-        cmd = [player, str(wav_path)] if player != "aplay" else [player, "-q", str(wav_path)]
         subprocess.run(
-            cmd,
+            ["aplay", "-q", str(wav_path)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
 
@@ -159,13 +164,14 @@ def _find_most_recent_assignment() -> Path | None:
 
 
 def pick() -> None:
-    """Pick an available sound and output the title. Used by shell wrapper."""
+    """Pick an available sound, reserve it atomically, and output title + reservation ID."""
     pool = _load_pool()
     if not pool:
         log.warning("pick: empty pool")
         return
     ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
     _cleanup_stale()
+    _cleanup_orphaned_reservations()
 
     assigned = _get_assigned_files()
     available = [s for s in pool if s["file"] not in assigned]
@@ -173,29 +179,49 @@ def pick() -> None:
         available = pool
 
     choice = random.choice(available)
-    log.debug("pick: chose %s (%s)", choice["name"], choice["file"])
-    print(_build_title(choice["name"]))
+    reservation_id = str(uuid.uuid4())
+    reservation_file = ASSIGNMENTS_DIR / f"{reservation_id}.json"
+    reservation_file.write_text(json.dumps({**choice, "reserved_at": time.time()}))
+    log.debug("pick: reserved %s (%s) -> %s", choice["name"], choice["file"], reservation_id)
+    print(f"{_build_title(choice['name'])}\t{reservation_id}")
 
 
 def assign(session_id: str) -> None:
-    """Assign a sound to this session, matching the --name from the wrapper."""
+    """Assign a sound to this session by claiming its reservation from pick()."""
     log.debug("assign: session_id=%s", session_id)
-    pool = _load_pool()
-    if not pool:
-        log.warning("assign: empty pool")
-        return
     ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    existing = ASSIGNMENTS_DIR / f"{session_id}.json"
-    if existing.is_file():
-        choice = json.loads(existing.read_text())
+    target = ASSIGNMENTS_DIR / f"{session_id}.json"
+    if target.is_file():
+        choice = json.loads(target.read_text())
         log.debug("assign: reusing existing %s", choice["name"])
     else:
-        title = os.environ.get("CLAUDE_SOUND_TITLE", "")
-        log.debug("assign: CLAUDE_SOUND_TITLE=%r", title)
-        choice = _find_sound_by_name(title) if title else None
+        choice = None
 
+        # Path 1: Claim reservation written by pick()
+        reservation_id = os.environ.get("CLAUDE_SOUND_RESERVATION", "")
+        if reservation_id:
+            reserve_file = ASSIGNMENTS_DIR / f"{reservation_id}.json"
+            if reserve_file.is_file():
+                choice = json.loads(reserve_file.read_text())
+                choice.pop("reserved_at", None)
+                target.write_text(json.dumps(choice))  # claim first
+                reserve_file.unlink(missing_ok=True)    # then release reservation
+                log.debug("assign: claimed reservation %s -> %s", reservation_id, choice["name"])
+
+        # Path 2: Legacy fallback -- match by CLAUDE_SOUND_TITLE env var
         if choice is None:
+            title = os.environ.get("CLAUDE_SOUND_TITLE", "")
+            if title:
+                log.debug("assign: trying CLAUDE_SOUND_TITLE=%r", title)
+                choice = _find_sound_by_name(title)
+
+        # Path 3: Random from available pool
+        if choice is None:
+            pool = _load_pool()
+            if not pool:
+                log.warning("assign: empty pool")
+                return
             assigned = _get_assigned_files()
             available = [s for s in pool if s["file"] not in assigned]
             if not available:
@@ -204,11 +230,9 @@ def assign(session_id: str) -> None:
             choice = random.choice(available)
             log.debug("assign: random fallback -> %s", choice["name"])
 
-        existing.write_text(json.dumps(choice))
-        log.debug("assign: wrote %s -> %s", existing.name, choice["name"])
-
-    # No .current_session marker needed -- sessions with assignments get sounds,
-    # sessions without (subagents) don't
+        if not target.is_file():
+            target.write_text(json.dumps(choice))
+            log.debug("assign: wrote %s -> %s", target.name, choice["name"])
 
     if os.environ.get("SESSION_SOUND_HOST") != "codex":
         print(json.dumps({
