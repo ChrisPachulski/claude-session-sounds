@@ -2,21 +2,18 @@
 Per-session sound assignment manager for Claude Code hooks.
 
 Called by hooks with JSON on stdin containing session_id:
-    python sound_manager.py assign   # SessionStart: pick & assign sound
-    python sound_manager.py play     # Stop: play the assigned sound
-    python sound_manager.py release  # SessionEnd: free the assignment
+    python sound_manager.py assign            # SessionStart: pick & assign sound
+    python sound_manager.py play [event]      # Stop: play sound (event: completion|error|approval|end)
+    python sound_manager.py release           # SessionEnd: free the assignment
 
 Called directly by shell wrapper (no stdin):
-    python sound_manager.py pick     # Pre-pick a sound for --name flag
+    python sound_manager.py pick              # Pre-pick a sound for --name flag
 """
-from __future__ import annotations
-
 import json
 import logging
 import os
 import random
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -25,8 +22,10 @@ from pathlib import Path
 
 SOUNDS_DIR = Path(__file__).parent
 ASSIGNMENTS_DIR = Path.home() / ".claude" / "sounds" / "assignments"
+EVENTS_DIR = SOUNDS_DIR / "events"
 PRESSURE_THRESHOLD = 5  # Only reclaim slots when fewer than this many available
 DEBUG_LOG = Path.home() / ".claude" / "sounds" / "debug.log"
+VALID_EVENTS = frozenset({"completion", "error", "approval", "start", "end"})
 
 # Production files only: no _a/_b/_c candidates, no src_ sources
 _CANDIDATE_RE = re.compile(r"^(src_|.*_[a-c])$", re.IGNORECASE)
@@ -60,12 +59,12 @@ _DISPLAY_NAMES: dict[str, str] = {
     "tetris": "Tetris",
 }
 
-logging.basicConfig(
-    filename=str(DEBUG_LOG),
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+from logging.handlers import RotatingFileHandler
+
+_handler = RotatingFileHandler(str(DEBUG_LOG), maxBytes=1_048_576, backupCount=2)
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+logging.root.addHandler(_handler)
+logging.root.setLevel(logging.DEBUG)
 log = logging.getLogger("sound_manager")
 
 
@@ -145,9 +144,36 @@ def _get_assigned_files() -> set[str]:
     return assigned
 
 
-def _build_title(sound_name: str) -> str:
-    """Build the session title string."""
-    return sound_name
+
+
+def _resolve_event_sound(primary_file: str, event: str) -> Path | None:
+    """Resolve the best WAV file for this event type.
+
+    For 'completion' and 'start': always returns the primary sound.
+    For 'end': returns event sound or None (silent).
+    For others: returns event sound or primary as fallback.
+
+    Resolution: per-sound variant -> universal default -> fallback.
+    """
+    primary_path = SOUNDS_DIR / primary_file
+
+    if event in ("completion", "start"):
+        return primary_path
+
+    # Tier 1: per-sound event variant
+    variant = EVENTS_DIR / event / primary_file
+    if variant.is_file():
+        return variant
+
+    # Tier 2: universal event default
+    default = EVENTS_DIR / event / "default.wav"
+    if default.is_file():
+        return default
+
+    # Tier 3: fallback
+    if event == "end":
+        return None  # silent exit
+    return primary_path  # error/approval fall back to primary
 
 
 def _play_sound(wav_path: Path) -> None:
@@ -161,18 +187,38 @@ def _play_sound(wav_path: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
     else:
-        for player_cmd in [
-            ["paplay", str(wav_path)],
-            ["pw-play", str(wav_path)],
+        subprocess.run(
             ["aplay", "-q", str(wav_path)],
-        ]:
-            if shutil.which(player_cmd[0]):
-                subprocess.run(
-                    player_cmd,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
-                )
-                return
-        log.warning("_play_sound: no Linux audio player found (tried paplay, pw-play, aplay)")
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        )
+
+
+def _play_detached(wav_path: Path) -> None:
+    """Play a sound in a fully detached background process.
+
+    The parent returns immediately. Sound plays in a child process that
+    survives parent exit. This prevents hooks from blocking Claude Code.
+    """
+    cmd = [sys.executable, str(Path(__file__)), "_play_file", str(wav_path)]
+    if sys.platform == "win32":
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NO_WINDOW = 0x08000000
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        subprocess.Popen(
+            cmd,
+            creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW,
+            startupinfo=si,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+        )
+    else:
+        subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+        )
 
 
 def _find_sound_by_name(name: str) -> dict[str, str] | None:
@@ -215,7 +261,7 @@ def pick() -> None:
     reservation_file = ASSIGNMENTS_DIR / f"{reservation_id}.json"
     reservation_file.write_text(json.dumps({**choice, "reserved_at": time.time()}))
     log.debug("pick: reserved %s (%s) -> %s", choice["name"], choice["file"], reservation_id)
-    print(f"{_build_title(choice['name'])}\t{reservation_id}")
+    print(f"{choice['name']}\t{reservation_id}")
 
 
 def assign(session_id: str) -> None:
@@ -237,8 +283,15 @@ def assign(session_id: str) -> None:
             if reserve_file.is_file():
                 choice = json.loads(reserve_file.read_text())
                 choice.pop("reserved_at", None)
-                target.write_text(json.dumps(choice))  # claim first
-                reserve_file.unlink(missing_ok=True)    # then release reservation
+                # Atomic claim to prevent race with concurrent assign()
+                try:
+                    fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(fd, json.dumps(choice).encode())
+                    os.close(fd)
+                except FileExistsError:
+                    # Another assign() claimed first -- read what they wrote
+                    choice = json.loads(target.read_text())
+                reserve_file.unlink(missing_ok=True)
                 log.debug("assign: claimed reservation %s -> %s", reservation_id, choice["name"])
 
         # Path 2: Legacy fallback -- match by CLAUDE_SOUND_TITLE env var
@@ -257,14 +310,20 @@ def assign(session_id: str) -> None:
             assigned = _get_assigned_files()
             available = [s for s in pool if s["file"] not in assigned]
             if not available:
-                log.warning("assign: all sounds assigned, no available slots")
-                return
+                log.warning("assign: pool exhausted, allowing duplicate assignment")
+                available = pool
             choice = random.choice(available)
             log.debug("assign: random fallback -> %s", choice["name"])
 
         if not target.is_file():
-            target.write_text(json.dumps(choice))
-            log.debug("assign: wrote %s -> %s", target.name, choice["name"])
+            # Atomic create to prevent TOCTOU race with concurrent assign()
+            try:
+                fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, json.dumps(choice).encode())
+                os.close(fd)
+                log.debug("assign: wrote %s -> %s", target.name, choice["name"])
+            except FileExistsError:
+                log.debug("assign: %s already claimed by concurrent session", target.name)
 
     if os.environ.get("SESSION_SOUND_HOST") != "codex":
         print(json.dumps({
@@ -278,9 +337,24 @@ def assign(session_id: str) -> None:
         }))
 
 
-def play(session_id: str) -> None:
-    """Play the assigned sound for this session."""
-    log.debug("play: session_id=%s", session_id)
+def play(session_id: str, event: str = "completion") -> None:
+    """Play the appropriate sound for this session and event type.
+
+    Resolution order:
+    1. events/{event}/{primary_stem}.wav  (per-sound variant)
+    2. events/{event}/default.wav         (universal event sound)
+    3. {primary_stem}.wav                 (primary sound fallback)
+
+    Args:
+        session_id: The Claude session ID.
+        event: One of "completion", "error", "approval", "end".
+               Defaults to "completion" for backward compatibility.
+    """
+    if event not in VALID_EVENTS:
+        log.warning("play: unknown event %r, falling back to completion", event)
+        event = "completion"
+
+    log.debug("play: session_id=%s event=%s", session_id, event)
     assignment_file = ASSIGNMENTS_DIR / f"{session_id}.json"
 
     if not assignment_file.is_file():
@@ -289,7 +363,6 @@ def play(session_id: str) -> None:
             return
         # Self-healing: auto-assign if no assignment found (ghost session or stale cleanup)
         log.warning("play: no assignment found for %s, auto-assigning", session_id)
-        # Call assign internals directly to avoid stdout pollution (assign() prints hookSpecificOutput)
         pool = _load_pool()
         if not pool:
             log.debug("play: auto-assign failed, empty pool")
@@ -303,19 +376,17 @@ def play(session_id: str) -> None:
         assignment_file.write_text(json.dumps(choice))
         log.debug("play: auto-assigned %s -> %s", session_id, choice["name"])
 
-    try:
-        choice = json.loads(assignment_file.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("play: corrupt assignment file for %s: %s", session_id, exc)
-        assignment_file.unlink(missing_ok=True)
+    choice = json.loads(assignment_file.read_text())
+    wav_path = _resolve_event_sound(choice["file"], event)
+    if wav_path is None:
+        log.debug("play: event %s resolved to silence", event)
         return
-    wav_path = SOUNDS_DIR / choice["file"]
-    log.debug("play: wav_path=%s exists=%s", wav_path, wav_path.is_file())
+    log.debug("play: wav_path=%s exists=%s event=%s", wav_path, wav_path.is_file(), event)
     if wav_path.is_file():
-        # Touch mtime so stale cleanup doesn't delete active sessions
+        # Touch mtime so pressure cleanup doesn't evict active sessions
         assignment_file.touch()
         _play_sound(wav_path)
-        log.debug("play: played %s", choice["name"])
+        log.debug("play: played %s (event=%s)", choice["name"], event)
     else:
         log.warning("play: WAV not found: %s", wav_path)
 
@@ -332,13 +403,16 @@ def release(session_id: str) -> None:
 
 
 if __name__ == "__main__":
-    if os.environ.get("SESSION_SOUNDS_DISABLED"):
-        sys.exit(0)
-
     action = sys.argv[1] if len(sys.argv) > 1 else ""
 
     if action == "pick":
         pick()
+    elif action == "_play_file":
+        # Detached child process entry point -- plays a single WAV and exits
+        if len(sys.argv) > 2:
+            target = Path(sys.argv[2])
+            if target.is_file():
+                _play_sound(target)
     elif action == "play-startup":
         title = os.environ.get("CLAUDE_SOUND_TITLE", "")
         if title:
@@ -362,6 +436,7 @@ if __name__ == "__main__":
         if action == "assign":
             assign(session_id)
         elif action == "play":
-            play(session_id)
+            event = sys.argv[2] if len(sys.argv) > 2 else "completion"
+            play(session_id, event=event)
         elif action == "release":
             release(session_id)

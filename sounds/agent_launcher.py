@@ -11,7 +11,6 @@ Usage:
     python agent_launcher.py claude [args...]
     python agent_launcher.py codex [args...]
 """
-from __future__ import annotations
 
 import json
 import os
@@ -27,10 +26,23 @@ from pathlib import Path
 # Import co-located sound_manager
 sys.path.insert(0, str(Path(__file__).parent))
 import sound_manager
+import terminal_title
 
 log = sound_manager.log
 
 CODEX_STATE_DB = Path.home() / ".codex" / "state_5.sqlite"
+
+# Claude title animation -- exact match of Claude Code's built-in title animation
+# Source: cli.js drK=["⠂","⠐"], UrK="✳", bgz=960
+CLAUDE_SPINNER_FRAMES = "\u2802\u2810"   # 2 alternating minimal dots (working state)
+CLAUDE_IDLE_ICON = "\u2733"              # ✳ eight-spoked asterisk (idle/done state)
+CLAUDE_SPINNER_INTERVAL = 0.96           # 960ms per frame
+
+# Codex title animation -- 10-frame braille spinner
+# Source: Codex CLI Rust binary spinner
+CODEX_SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+CODEX_IDLE_ICON = "\u2733"               # ✳ same idle icon for consistency
+CODEX_SPINNER_INTERVAL = 0.08            # 80ms per frame
 
 
 # ---------------------------------------------------------------------------
@@ -38,20 +50,68 @@ CODEX_STATE_DB = Path.home() / ".codex" / "state_5.sqlite"
 # ---------------------------------------------------------------------------
 
 def _emit_title(title: str) -> None:
-    """Write ANSI title sequences to stderr and CONOUT$ (Windows)."""
-    sequence = f"\033]0;{title}\007\033]2;{title}\007"
+    """Set terminal tab title using the best mechanism for this terminal."""
+    terminal_title.emit_title(title)
+
+
+# ---------------------------------------------------------------------------
+# Spinner thread (replaces Claude's built-in title animation)
+# ---------------------------------------------------------------------------
+
+def _spinner_state_path(session_id: str) -> Path:
+    """Path to the spinner state flag file for this session."""
+    return sound_manager.ASSIGNMENTS_DIR / f".spinner_{session_id}"
+
+
+def _read_spinner_state(session_id: str) -> str:
+    """Read spinner state. Returns 'spin' or 'idle'. Default: 'idle'."""
     try:
-        sys.stderr.write(sequence)
-        sys.stderr.flush()
-    except Exception:
+        return _spinner_state_path(session_id).read_text().strip()
+    except (OSError, ValueError):
+        return "idle"
+
+
+def _write_spinner_state(session_id: str, state: str) -> None:
+    """Write spinner state from within the launcher process."""
+    try:
+        import tempfile
+        dir_ = str(sound_manager.ASSIGNMENTS_DIR)
+        fd, tmp = tempfile.mkstemp(dir=dir_, prefix=".spintmp_")
+        os.write(fd, state.encode())
+        os.close(fd)
+        os.replace(tmp, str(_spinner_state_path(session_id)))
+    except OSError:
         pass
-    if sys.platform == "win32":
-        try:
-            with open("CONOUT$", "w") as con:
-                con.write(sequence)
-                con.flush()
-        except Exception:
-            pass
+
+
+def _spinner_thread(
+    session_id: str,
+    title: str,
+    stop_event: threading.Event,
+    agent: str = "claude",
+) -> None:
+    """Daemon thread: animate title when working, show static icon when idle.
+
+    Claude: alternates "⠂ Title" / "⠐ Title" at 960ms, idle "✳ Title"
+    Codex:  10-frame braille spinner at 80ms, idle "✳ Title"
+    """
+    if agent == "codex":
+        frames, idle_icon, interval = CODEX_SPINNER_FRAMES, CODEX_IDLE_ICON, CODEX_SPINNER_INTERVAL
+    else:
+        frames, idle_icon, interval = CLAUDE_SPINNER_FRAMES, CLAUDE_IDLE_ICON, CLAUDE_SPINNER_INTERVAL
+
+    idx = 0
+    while not stop_event.is_set():
+        state = _read_spinner_state(session_id)
+        if state == "idle":
+            _emit_title(f"{idle_icon} {title}")
+        else:
+            frame = frames[idx % len(frames)]
+            _emit_title(f"{frame} {title}")
+            idx += 1
+        stop_event.wait(interval)
+    # Final static title on shutdown
+    _emit_title(f"{idle_icon} {title}")
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +156,45 @@ def _claim_reservation(reservation_id: str) -> None:
 # Codex rollout discovery
 # ---------------------------------------------------------------------------
 
+def _claim_file_for_rollout(rollout: Path) -> Path:
+    """Return the claim lock file path for a given rollout."""
+    # Use a hash of the rollout path as the lock filename
+    rollout_hash = hash(str(rollout)) & 0xFFFFFFFF
+    return sound_manager.ASSIGNMENTS_DIR / f".rollout_claim_{rollout_hash:08x}"
+
+
+def _claim_rollout(rollout: Path) -> bool:
+    """Atomically claim a rollout path via O_CREAT|O_EXCL. Returns True if we won."""
+    sound_manager.ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    claim_file = _claim_file_for_rollout(rollout)
+    try:
+        fd = os.open(str(claim_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(rollout).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+
+def _is_rollout_claimed(rollout: Path) -> bool:
+    """Check if a rollout is already claimed by another launcher."""
+    return _claim_file_for_rollout(rollout).is_file()
+
+
+def _release_rollout(rollout: Path) -> None:
+    """Release a claimed rollout path."""
+    try:
+        _claim_file_for_rollout(rollout).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _find_codex_rollout(launch_epoch: float, timeout: float = 60.0) -> Path | None:
     """Find the rollout JSONL for the current Codex session.
 
     Strategy: try the DB first (fast), then fall back to scanning the
     sessions directory for recently-created JSONL files (robust against
-    DB transaction delays).
+    DB transaction delays). Skips rollouts already claimed by other launchers.
     """
     deadline = time.time() + timeout
     sessions_dir = Path.home() / ".codex" / "sessions"
@@ -113,33 +206,35 @@ def _find_codex_rollout(launch_epoch: float, timeout: float = 60.0) -> Path | No
                 c = conn.cursor()
                 c.execute(
                     "SELECT rollout_path, created_at FROM threads "
-                    "ORDER BY created_at DESC LIMIT 1"
+                    "WHERE created_at >= ? ORDER BY created_at DESC",
+                    (launch_epoch,),
                 )
-                row = c.fetchone()
-            if row and row[0]:
-                rollout = Path(row[0])
-                if row[1] >= launch_epoch and rollout.exists():
-                    log.debug("launcher: found rollout via DB %s", rollout)
-                    return rollout
+                for row in c.fetchall():
+                    if row[0]:
+                        rollout = Path(row[0])
+                        if not _is_rollout_claimed(rollout) and rollout.exists():
+                            if _claim_rollout(rollout):
+                                log.debug("launcher: found rollout via DB %s", rollout)
+                                return rollout
         except Exception as exc:
             log.debug("launcher: rollout query error: %s", exc)
 
         # Strategy 2: filesystem scan (robust against uncommitted transactions)
         try:
-            now = time.time()
             candidates = []
             for jsonl in sessions_dir.rglob("rollout-*.jsonl"):
                 try:
                     mtime = jsonl.stat().st_mtime
-                    if mtime >= launch_epoch:
+                    if mtime >= launch_epoch and not _is_rollout_claimed(jsonl):
                         candidates.append((mtime, jsonl))
                 except OSError:
                     pass
             if candidates:
                 candidates.sort(reverse=True)
-                rollout = candidates[0][1]
-                log.debug("launcher: found rollout via filesystem scan %s", rollout)
-                return rollout
+                for _, rollout in candidates:
+                    if _claim_rollout(rollout):
+                        log.debug("launcher: found rollout via filesystem scan %s", rollout)
+                        return rollout
         except Exception as exc:
             log.debug("launcher: filesystem scan error: %s", exc)
 
@@ -209,9 +304,10 @@ def _codex_watcher(
                                 and event.get("payload", {}).get("type")
                                 == "task_complete"
                             ):
-                                log.debug("watcher: task_complete -> play + title")
-                                sound_manager.play(session_id)
-                                _emit_title(title)
+                                log.debug("watcher: task_complete -> play + idle")
+                                sound_manager.play(session_id, event="completion")
+                                # Signal spinner to idle (task done)
+                                _write_spinner_state(session_id, "idle")
                         except json.JSONDecodeError:
                             pass
         except Exception as exc:
@@ -253,9 +349,6 @@ def _agent_cmd(agent: str, title: str, args: list[str]) -> list[str]:
 
 def launch(agent: str, args: list[str]) -> int:
     """Launch an agent with full sound + title lifecycle management."""
-    if os.environ.get("SESSION_SOUNDS_DISABLED"):
-        return subprocess.call(_agent_cmd(agent, "", args))
-
     result = _pick_sound()
     if not result:
         return subprocess.call(_agent_cmd(agent, "", args))
@@ -268,8 +361,13 @@ def launch(agent: str, args: list[str]) -> int:
     os.environ["CLAUDE_SOUND_RESERVATION"] = reservation_id
     os.environ["SESSION_SOUND_HOST"] = agent
 
-    # Set terminal title immediately
-    _emit_title(title)
+    # Disable Claude's built-in title animation -- we handle it ourselves
+    # This prevents the startup title fight where Claude overwrites our name
+    # Fixed in Claude Code v2.1.79+. Known bug: clears title on exit (#31581)
+    os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
+
+    # Set terminal title immediately (before agent starts) -- idle state with asterisk
+    _emit_title(f"{CLAUDE_IDLE_ICON} {title}")
 
     # Startup sound in background thread
     wav_path = sound_manager.SOUNDS_DIR / choice["file"]
@@ -282,6 +380,8 @@ def launch(agent: str, args: list[str]) -> int:
     # Claude: leave reservation for hooks to claim via assign()
     if agent == "codex":
         _claim_reservation(reservation_id)
+        # Codex starts working immediately -- set spinner to spin
+        _write_spinner_state(reservation_id, "spin")
 
     launch_epoch = time.time() - 2  # buffer for process startup latency
     cmd = _agent_cmd(agent, title, args)
@@ -289,6 +389,16 @@ def launch(agent: str, args: list[str]) -> int:
 
     stop_event = threading.Event()
     watcher_thread = None
+    spinner_thread_ref = None
+    rollout = None
+
+    # Start spinner thread (runs for entire session, daemon=True)
+    spinner_thread_ref = threading.Thread(
+        target=_spinner_thread,
+        args=(reservation_id, title, stop_event, agent),
+        daemon=True,
+    )
+    spinner_thread_ref.start()
 
     try:
         proc = subprocess.Popen(cmd)
@@ -321,9 +431,17 @@ def launch(agent: str, args: list[str]) -> int:
         stop_event.set()
         if watcher_thread and watcher_thread.is_alive():
             watcher_thread.join(timeout=2.0)
+        # Clean up spinner state file
+        try:
+            _spinner_state_path(reservation_id).unlink(missing_ok=True)
+        except OSError:
+            pass
 
         if agent == "codex":
             sound_manager.release(reservation_id)
+            # Release rollout claim so other launchers can reuse the slot
+            if rollout:
+                _release_rollout(rollout)
         else:
             # Claude hooks handle release; clean up unclaimed reservation
             res_file = sound_manager.ASSIGNMENTS_DIR / f"{reservation_id}.json"

@@ -1,56 +1,70 @@
-"""Hook script that pushes terminal-title updates for both Claude and Codex."""
-from __future__ import annotations
+"""Hook script that signals the spinner thread to change state.
 
+On Stop/SessionEnd: writes 'idle' -> spinner shows static title
+On UserPromptSubmit/SessionStart: writes 'spin' -> spinner animates
+
+Also emits the title directly as a fallback (for agents without a spinner thread).
+"""
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+import terminal_title
 
 ASSIGNMENTS_DIR = Path.home() / ".claude" / "sounds" / "assignments"
 
+# Map hook events to spinner states
+_EVENT_STATE = {
+    "Stop": "idle",
+    "SessionEnd": "idle",
+    "SessionStart": "spin",
+    "UserPromptSubmit": "spin",
+    "Notification": "idle",
+    "StopFailure": "idle",
+}
 
-def _get_title() -> str | None:
-    try:
-        stdin_data = json.loads(sys.stdin.read())
-    except Exception:
-        return None
+try:
+    stdin_data = json.loads(sys.stdin.read())
+except Exception:
+    stdin_data = {}
 
-    session_id = stdin_data.get("session_id", "")
-    if not session_id:
-        return None
+session_id = stdin_data.get("session_id", "")
+# hook_event_name is NOT in Claude's stdin JSON -- take it from CLI arg instead
+hook_event = sys.argv[1] if len(sys.argv) > 1 else ""
 
+if session_id:
     assignment_file = ASSIGNMENTS_DIR / f"{session_id}.json"
-    if not assignment_file.exists():
-        return None
+    if assignment_file.exists():
+        try:
+            assignment = json.loads(assignment_file.read_text())
+            name = assignment.get("name", "")
+        except Exception:
+            name = ""
 
-    try:
-        assignment = json.loads(assignment_file.read_text())
-    except Exception:
-        return None
+        if name:
+            # Signal the spinner thread via state file
+            state = _EVENT_STATE.get(hook_event, "spin")
+            # Find the spinner state file (keyed by reservation_id from env, or session_id)
+            reservation_id = os.environ.get("CLAUDE_SOUND_RESERVATION", "")
 
-    return assignment.get("name", "") or None
+            # Try reservation_id first (launcher uses this as session key for spinner)
+            for sid in (reservation_id, session_id):
+                if sid:
+                    state_file = ASSIGNMENTS_DIR / f".spinner_{sid}"
+                    try:
+                        dir_ = str(ASSIGNMENTS_DIR)
+                        fd, tmp = tempfile.mkstemp(dir=dir_, prefix=".spintmp_")
+                        os.write(fd, state.encode())
+                        os.close(fd)
+                        os.replace(tmp, str(state_file))
+                    except OSError:
+                        try:
+                            os.unlink(tmp)
+                        except Exception:
+                            pass
 
-
-def _emit_terminal_sequences(title: str) -> None:
-    sequence = f"\033]0;{title}\007\033]2;{title}\007"
-    try:
-        sys.stderr.write(sequence)
-        sys.stderr.flush()
-    except Exception:
-        pass
-    try:
-        with open("CONOUT$", "w") as con:
-            con.write(sequence)
-            con.flush()
-    except Exception:
-        pass
-
-
-def set_title() -> None:
-    title = _get_title()
-    if not title:
-        return
-    _emit_terminal_sequences(title)
-
-
-if __name__ == "__main__":
-    set_title()
+            # Also emit title directly (fallback for non-spinner agents like Codex)
+            terminal_title.emit_title(name)
