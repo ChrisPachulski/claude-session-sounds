@@ -131,12 +131,45 @@ def _cleanup_orphaned_reservations() -> None:
             pass
 
 
+def _is_lock_held(lock_file: Path) -> bool:
+    """Check if a lock file is held by a live process.
+
+    Windows: open files cannot be deleted, so a successful unlink means dead.
+    Unix: open files CAN be unlinked, so we try an exclusive flock instead.
+    """
+    if sys.platform == "win32":
+        try:
+            lock_file.unlink()
+            return False  # deleted = owner dead
+        except PermissionError:
+            return True  # can't delete = owner alive
+        except OSError:
+            return False
+    else:
+        import fcntl
+        try:
+            fd = os.open(str(lock_file), os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Got the lock = nobody else holds it = owner dead
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+                lock_file.unlink(missing_ok=True)
+                return False
+            except (OSError, BlockingIOError):
+                os.close(fd)
+                return True  # can't lock = owner alive
+        except OSError:
+            return False
+
+
 def _cleanup_dead_sessions() -> None:
     """Evict assignments whose owning launcher process is dead.
 
     Each launcher holds .lock_{reservation_id} open for its session lifetime.
-    On Windows, open files cannot be deleted -- so if we CAN delete the lock
-    file, the launcher is dead and the assignment is orphaned.
+    Liveness detection is OS-aware:
+    - Windows: open files can't be deleted (PermissionError = alive)
+    - Unix: uses fcntl.flock (LOCK_EX|LOCK_NB fails = alive)
 
     Assignments without lock files (pre-lock-system) are left alone here;
     pressure-based cleanup handles them as a backstop.
@@ -156,16 +189,10 @@ def _cleanup_dead_sessions() -> None:
             if not lock_file.exists():
                 continue  # no lock = legacy session, let pressure cleanup handle it
 
-            # Try to delete the lock file -- succeeds only if owner process is dead
-            try:
-                lock_file.unlink()
+            if not _is_lock_held(lock_file):
                 log.debug("Dead session cleanup: evicting %s (owner dead)", f.name)
                 f.unlink(missing_ok=True)
                 _cleanup_session_artifacts(res_id)
-            except PermissionError:
-                pass  # Lock held open = owner alive
-            except OSError:
-                pass
         except (json.JSONDecodeError, OSError):
             pass
 

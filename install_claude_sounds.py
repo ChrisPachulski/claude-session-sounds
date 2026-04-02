@@ -115,17 +115,22 @@ def _hook_commands() -> dict:
 def _configure_codex_title() -> None:
     """Disable Codex's native terminal title so session-sounds controls it.
 
-    Adds [tui] terminal_title = [] to ~/.codex/config.toml, preserving
+    Sets terminal_title = [] under [tui] in ~/.codex/config.toml, preserving
     any existing config. Without this, Codex's built-in title animation
     fights with the session-sounds spinner at high frequency.
     """
     CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     if CODEX_CONFIG_PATH.is_file():
         content = CODEX_CONFIG_PATH.read_text()
-        if "terminal_title" in content:
-            print("  Codex terminal_title already configured")
+        # Check if already set to empty -- the only correct value
+        if "terminal_title = []" in content:
+            print("  Codex terminal_title already disabled")
             return
-        # Append [tui] section
+        # Remove any existing terminal_title line (upgrade path)
+        import re
+        content = re.sub(r"^\s*terminal_title\s*=.*$", "", content, flags=re.MULTILINE)
+        content = re.sub(r"\n{3,}", "\n\n", content)  # collapse blank lines
+        # Add under [tui] section
         if "[tui]" in content:
             content = content.replace("[tui]", "[tui]\nterminal_title = []")
         else:

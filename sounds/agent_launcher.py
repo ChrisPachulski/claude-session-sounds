@@ -387,10 +387,13 @@ def launch(agent: str, args: list[str]) -> int:
         _write_spinner_state(reservation_id, "spin")
 
     # Lock file for liveness detection -- held open for the entire session.
-    # On Windows, open files can't be deleted, so cleanup can probe liveness
-    # by attempting to unlink the lock file.
+    # Windows: open files can't be deleted (cleanup probes via unlink)
+    # Unix: uses fcntl.flock (cleanup probes via LOCK_EX|LOCK_NB)
     lock_file = sound_manager.ASSIGNMENTS_DIR / f".lock_{reservation_id}"
     lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+    if sys.platform != "win32":
+        import fcntl
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
     launch_epoch = time.time() - 2  # buffer for process startup latency
     cmd = _agent_cmd(agent, title, args)
