@@ -241,6 +241,19 @@ def install() -> None:
                 shutil.copytree(theme_dir, dst_theme, dirs_exist_ok=True)
         print(f"  Copied themes to {themes_dst}")
 
+    # Write session-sounds config (preserves existing settings, adds defaults)
+    config_file = SOUNDS_DST / "config.json"
+    config: dict = {}
+    if config_file.is_file():
+        try:
+            config = json.loads(config_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    config.setdefault("enabled", True)
+    config.setdefault("theme", "default")
+    config_file.write_text(json.dumps(config, indent=2))
+    print(f"  Config: enabled={config['enabled']}, theme={config['theme']}")
+
     # 3. Merge hooks into settings.json
     settings: dict = {}
     if SETTINGS_PATH.is_file():

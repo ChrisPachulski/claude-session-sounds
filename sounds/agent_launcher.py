@@ -353,9 +353,9 @@ def _agent_cmd(agent: str, title: str, args: list[str]) -> list[str]:
 
 def launch(agent: str, args: list[str]) -> int:
     """Launch an agent with full sound + title lifecycle management."""
-    # Kill switch: set SESSION_SOUNDS_DISABLED=1 to bypass all sound/title
-    # management and launch the agent directly.  Unset the var to re-enable.
-    if os.environ.get("SESSION_SOUNDS_DISABLED"):
+    # Kill switch: env var OR config.json enabled=false bypasses all sound/title
+    # management and launches the agent directly.
+    if os.environ.get("SESSION_SOUNDS_DISABLED") or not sound_manager._config.get("enabled", True):
         return subprocess.call(_agent_cmd(agent, "", args))
     result = _pick_sound()
     if not result:

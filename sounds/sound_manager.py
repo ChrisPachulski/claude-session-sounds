@@ -26,7 +26,24 @@ EVENTS_DIR = SOUNDS_DIR / "events"
 PRESSURE_THRESHOLD = 5  # Only reclaim slots when fewer than this many available
 DEBUG_LOG = Path.home() / ".claude" / "sounds" / "debug.log"
 THEMES_DIR = SOUNDS_DIR / "themes"
-SESSION_SOUNDS_THEME = os.environ.get("SESSION_SOUNDS_THEME", "default")
+CONFIG_FILE = SOUNDS_DIR / "config.json"
+
+
+def _load_config() -> dict:
+    """Load persistent config from ~/.claude/sounds/config.json."""
+    if CONFIG_FILE.is_file():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+_config = _load_config()
+# Env var overrides config file; config file overrides default
+SESSION_SOUNDS_THEME = os.environ.get(
+    "SESSION_SOUNDS_THEME", _config.get("theme", "default")
+)
 
 
 def _load_theme_config() -> dict:
@@ -590,9 +607,9 @@ def release(session_id: str) -> None:
 
 
 if __name__ == "__main__":
-    # Kill switch: when set, skip all hook actions (assign/play/release).
-    # Detached _play_file children inherit this var, so they also exit early.
-    if os.environ.get("SESSION_SOUNDS_DISABLED"):
+    # Kill switch: env var OR config.json enabled=false disables all sounds.
+    # Detached _play_file children inherit the env var, so they also exit early.
+    if os.environ.get("SESSION_SOUNDS_DISABLED") or not _config.get("enabled", True):
         sys.exit(0)
     action = sys.argv[1] if len(sys.argv) > 1 else ""
 
