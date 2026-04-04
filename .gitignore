@@ -5,6 +5,8 @@ assignments/*.json
 pending_pick.json
 
 # WAV files -- sounds are local-only, never committed
-# Exception: synthesized event defaults (events/*/default.wav) are tracked
 sounds/*.wav
 sounds/themes/**/*.wav
+
+# Exception: synthesized event defaults are tracked (non-copyrighted)
+!sounds/events/*/default.wav
