@@ -287,44 +287,18 @@ def _get_assigned_files() -> set[str]:
 
 
 def _resolve_event_sound(primary_file: str, event: str) -> Path | None:
-    """Resolve the best WAV file for this event type.
+    """Resolve the WAV file for this event type.
 
-    For 'completion' and 'start': always returns the primary sound.
-    For 'end': returns event sound or None (silent).
-    For others: returns event sound or primary as fallback.
-
-    Resolution: per-sound variant -> universal default -> fallback.
-    Handles both relative filenames (legacy pool) and absolute paths (pack system).
+    - completion, start, approval, error: always the session's identity sound.
+    - end: always silent.
     """
+    if event == "end":
+        return None
+
     primary_path = Path(primary_file)
     if not primary_path.is_absolute():
         primary_path = SOUNDS_DIR / primary_file
-
-    if event in ("completion", "start"):
-        return primary_path
-
-    # Tier 0: theme-specific event variant
-    primary_wav_name = Path(primary_file).name  # e.g. "africa.wav" regardless of abs/rel
-    theme_events = THEMES_DIR / SESSION_SOUNDS_THEME / "events" / event
-    variant = theme_events / primary_wav_name
-    if variant.is_file():
-        return variant
-
-    # Tier 1: per-sound event variant (only for relative/legacy sounds)
-    if not Path(primary_file).is_absolute():
-        variant = EVENTS_DIR / event / primary_file
-        if variant.is_file():
-            return variant
-
-    # Tier 2: universal event default
-    default = EVENTS_DIR / event / "default.wav"
-    if default.is_file():
-        return default
-
-    # Tier 3: fallback
-    if event == "end":
-        return None  # silent exit
-    return primary_path  # error/approval fall back to primary
+    return primary_path
 
 
 _linux_play_cmd: list[str] | None = None
