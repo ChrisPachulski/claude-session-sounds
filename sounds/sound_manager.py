@@ -520,41 +520,16 @@ def play(session_id: str, event: str = "completion") -> None:
     assignment_file = ASSIGNMENTS_DIR / f"{session_id}.json"
 
     if not assignment_file.is_file():
-        if session_id == "unknown":
-            log.debug("play: unknown session_id, skipping")
-            return
-        # Self-healing: auto-assign if no assignment found (ghost session or stale cleanup)
-        log.warning("play: no assignment found for %s, auto-assigning", session_id)
-        pool = _load_pool()
-        if not pool:
-            log.debug("play: auto-assign failed, empty pool")
-            return
-        ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        assigned = _get_assigned_files()
-        available = [s for s in pool if s["file"] not in assigned]
-        if not available:
-            available = pool
-        choice = random.choice(available)
-        assignment_file.write_text(json.dumps(choice))
-        log.debug("play: auto-assigned %s -> %s", session_id, choice["name"])
+        # No assignment = not a session we launched (subagent, ghost, etc). Stay silent.
+        log.debug("play: no assignment for %s, skipping (likely subagent)", session_id)
+        return
 
     try:
         choice = json.loads(assignment_file.read_text())
     except (json.JSONDecodeError, OSError) as exc:
-        log.warning("play: corrupt assignment %s: %s, re-assigning", assignment_file.name, exc)
+        log.warning("play: corrupt assignment %s: %s, skipping", assignment_file.name, exc)
         assignment_file.unlink(missing_ok=True)
-        pool = _load_pool()
-        if not pool:
-            log.debug("play: re-assign failed, empty pool")
-            return
-        ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        assigned = _get_assigned_files()
-        available = [s for s in pool if s["file"] not in assigned]
-        if not available:
-            available = pool
-        choice = random.choice(available)
-        assignment_file.write_text(json.dumps(choice))
-        log.debug("play: re-assigned %s -> %s", session_id, choice["name"])
+        return
     wav_path = _resolve_event_sound(choice["file"], event)
     if wav_path is None:
         log.debug("play: event %s resolved to silence", event)
