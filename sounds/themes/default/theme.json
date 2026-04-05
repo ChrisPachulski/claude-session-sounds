@@ -1,7 +1,15 @@
 {
     "schema_version": 1,
     "name": "Default",
-    "description": "Built-in notification sounds (royalty-free)",
+    "description": "Synthesized notification sounds -- copyright-free, ships with session-sounds",
     "author": "session-sounds",
-    "sounds": {}
+    "sounds": {
+        "bright_cascade": "Bright Cascade",
+        "warm_bell": "Warm Bell",
+        "pulse_bounce": "Pulse Bounce",
+        "glass_chime": "Glass Chime",
+        "synth_stab": "Synth Stab",
+        "kalimba": "Kalimba",
+        "orbit": "Orbit"
+    }
 }

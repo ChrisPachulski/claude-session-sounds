@@ -8,5 +8,6 @@ pending_pick.json
 sounds/*.wav
 sounds/themes/**/*.wav
 
-# Exception: synthesized event defaults are tracked (non-copyrighted)
+# Exception: synthesized sounds are tracked (copyright-free, ship with repo)
 !sounds/events/*/default.wav
+!sounds/themes/default/*.wav

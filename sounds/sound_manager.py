@@ -104,7 +104,7 @@ log = logging.getLogger("sound_manager")
 
 
 def _load_pool() -> list[dict[str, str]]:
-    """Build sound pool. Active pack takes priority; theme dir; legacy glob as fallback."""
+    """Build sound pool. Active pack takes priority; theme dir as default."""
     # Priority 1: Pack system (if active)
     try:
         from pack_loader import load_pack_pool
@@ -117,31 +117,23 @@ def _load_pool() -> list[dict[str, str]]:
     except Exception as exc:
         log.warning("_load_pool: pack_loader error: %s", exc)
 
-    # Priority 2: Theme directory WAVs
+    # Priority 2: Theme directory WAVs (default theme ships with synthesized sounds)
     theme_config = _load_theme_config()
     theme_names = theme_config.get("sounds", {})
     theme_dir = THEMES_DIR / SESSION_SOUNDS_THEME
 
-    if theme_dir.is_dir():
-        wavs = sorted(theme_dir.glob("*.wav"))
-        if wavs:
-            pool = []
-            for wav in wavs:
-                if _CANDIDATE_RE.match(wav.stem):
-                    continue
-                name = theme_names.get(wav.stem, wav.stem.replace("_", " ").title())
-                pool.append({"file": str(wav), "name": name})
-            if pool:
-                log.debug("_load_pool: theme '%s' (%d sounds)", SESSION_SOUNDS_THEME, len(pool))
-                return pool
-
-    # Priority 3: Legacy -- loose WAVs in SOUNDS_DIR
     pool = []
-    for wav in sorted(SOUNDS_DIR.glob("*.wav")):
-        if _CANDIDATE_RE.match(wav.stem):
-            continue
-        name = _DISPLAY_NAMES.get(wav.stem, wav.stem.replace("_", " ").title())
-        pool.append({"file": wav.name, "name": name})
+    if theme_dir.is_dir():
+        for wav in sorted(theme_dir.glob("*.wav")):
+            if _CANDIDATE_RE.match(wav.stem):
+                continue
+            name = theme_names.get(wav.stem, wav.stem.replace("_", " ").title())
+            pool.append({"file": str(wav), "name": name})
+
+    if pool:
+        log.debug("_load_pool: theme '%s' (%d sounds)", SESSION_SOUNDS_THEME, len(pool))
+    else:
+        log.warning("_load_pool: theme '%s' has no WAVs -- run generate_default_theme.py", SESSION_SOUNDS_THEME)
     return pool
 
 
